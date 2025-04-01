@@ -10,9 +10,10 @@ import (
 const maxRetries = 5
 
 type TgAPI interface {
-	SendMessage(chatID int64, msg tgbotapi.MessageConfig) error
+	SendMessage(chatID int64, msg tgbotapi.Chattable) (tgbotapi.Message, error)
 	SetWebhook(webhookURL string) error
-	ListenForWebhook(pattern string) tgbotapi.UpdatesChannel
+	AnswerCallbackQuery(callbackID string) error
+	DeleteMessage(config tgbotapi.DeleteMessageConfig) (err error)
 }
 
 type tgAPI struct {
@@ -27,18 +28,25 @@ func NewTgAPI(token string) (TgAPI, error) {
 	return &tgAPI{botAPI: botAPI}, nil
 }
 
-func (tg *tgAPI) SendMessage(chatID int64, msg tgbotapi.MessageConfig) error {
-	var err error
+func withRetries(f func() error) {
 	for i := 0; i < maxRetries; i++ {
-		_, err = tg.botAPI.Send(msg)
+		err := f()
 		if err == nil {
-			return nil
+			return
 		}
 
 		log.Printf("Попытка отправки сообщения %d: не удалось отправить запрос: %v", i+1, err)
 		time.Sleep(time.Duration(2^i) * time.Second)
 	}
-	return err
+	return
+}
+
+func (tg *tgAPI) SendMessage(chatID int64, msg tgbotapi.Chattable) (sentMsg tgbotapi.Message, err error) {
+	withRetries(func() error {
+		sentMsg, err = tg.botAPI.Send(msg)
+		return err
+	})
+	return
 }
 
 func (tg *tgAPI) SetWebhook(webhookURL string) error {
@@ -46,6 +54,18 @@ func (tg *tgAPI) SetWebhook(webhookURL string) error {
 	return err
 }
 
-func (tg *tgAPI) ListenForWebhook(pattern string) tgbotapi.UpdatesChannel {
-	return tg.botAPI.ListenForWebhook(pattern)
+func (tg *tgAPI) AnswerCallbackQuery(callbackID string) (err error) {
+	withRetries(func() error {
+		_, err = tg.botAPI.AnswerCallbackQuery(tgbotapi.NewCallback(callbackID, ""))
+		return err
+	})
+	return
+}
+
+func (tg *tgAPI) DeleteMessage(config tgbotapi.DeleteMessageConfig) (err error) {
+	withRetries(func() error {
+		_, err = tg.botAPI.DeleteMessage(config)
+		return err
+	})
+	return err
 }

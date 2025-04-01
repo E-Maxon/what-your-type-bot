@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
@@ -23,7 +24,11 @@ type PsyhoType struct {
 }
 
 func ParseConfig() (*Config, error) {
-	file, err := os.ReadFile("config.json")
+	dir, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.ReadFile(fmt.Sprintf("%s/../../config/config_test.json", dir))
 	if err != nil {
 		return nil, err
 	}
