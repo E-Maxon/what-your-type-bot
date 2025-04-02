@@ -202,9 +202,5 @@
                 68
             ]
         }
-    },
-    "telegram": {
-        "token": "8186008644:AAGCYlICN_VM0IUidsrVwYly_f8tEJqy_Ck",
-        "webhook_url": "https://b8cb258d4db0e7.lhr.life"
     }
 }

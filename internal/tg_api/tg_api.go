@@ -10,7 +10,7 @@ import (
 const maxRetries = 5
 
 type TgAPI interface {
-	SendMessage(chatID int64, msg tgbotapi.Chattable) (tgbotapi.Message, error)
+	SendMessage(msg tgbotapi.Chattable) (tgbotapi.Message, error)
 	SetWebhook(webhookURL string) error
 	AnswerCallbackQuery(callbackID string) error
 	DeleteMessage(config tgbotapi.DeleteMessageConfig) (err error)
@@ -41,7 +41,7 @@ func withRetries(f func() error) {
 	return
 }
 
-func (tg *tgAPI) SendMessage(chatID int64, msg tgbotapi.Chattable) (sentMsg tgbotapi.Message, err error) {
+func (tg *tgAPI) SendMessage(msg tgbotapi.Chattable) (sentMsg tgbotapi.Message, err error) {
 	withRetries(func() error {
 		sentMsg, err = tg.botAPI.Send(msg)
 		return err
