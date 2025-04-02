@@ -17,7 +17,7 @@ func createStartButton() tgbotapi.InlineKeyboardMarkup {
 }
 
 func formatQuestion(index int, question string) string {
-	return fmt.Sprintf("Вопрос №%d: %s", index+1, question)
+	return fmt.Sprintf("<b>Вопрос №%d:</b> %s", index+1, question)
 }
 
 func formatCallbackData(index int, variant string) *string {

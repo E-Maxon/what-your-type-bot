@@ -2,19 +2,14 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
-type Config struct {
-	Greeting     string                `json:"greeting"`
-	Questions    []string              `json:"questions"`
-	Calculation  map[string]*PsyhoType `json:"calculation"`
-	TelegramInfo *TelegramInfo         `json:"telegram"`
-}
-
-type TelegramInfo struct {
-	Token      string `json:"token"`
-	WebhookUrl string `json:"webhook_url"`
+type QuizData struct {
+	Greeting    string                `json:"greeting"`
+	Questions   []string              `json:"questions"`
+	Calculation map[string]*PsyhoType `json:"calculation"`
 }
 
 type PsyhoType struct {
@@ -22,23 +17,45 @@ type PsyhoType struct {
 	QuestionIndexes []int  `json:"questions"`
 }
 
+type TelegramInfo struct {
+	Token      string
+	WebhookUrl string
+}
+
+type Config struct {
+	QuizData     *QuizData
+	TelegramInfo *TelegramInfo
+}
+
 func ParseConfig() (*Config, error) {
-	file, err := os.ReadFile("config.json")
+	cfgPath := os.Getenv("CONFIG_PATH")
+	if cfgPath == "" {
+		return nil, fmt.Errorf("config path is empty")
+	}
+	file, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return nil, err
 	}
 
-	var cfg Config
-	err = json.Unmarshal(file, &cfg)
+	var quizData QuizData
+	err = json.Unmarshal(file, &quizData)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, psychoType := range cfg.Calculation {
+	for _, psychoType := range quizData.Calculation {
 		for i := range psychoType.QuestionIndexes {
 			psychoType.QuestionIndexes[i]--
 		}
 	}
 
-	return &cfg, nil
+	cfg := &Config{
+		QuizData: &quizData,
+		TelegramInfo: &TelegramInfo{
+			Token:      os.Getenv("BOT_TOKEN"),
+			WebhookUrl: os.Getenv("WEBHOOK_URL"),
+		},
+	}
+
+	return cfg, nil
 }
