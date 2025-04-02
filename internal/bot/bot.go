@@ -1,9 +1,10 @@
 package bot
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"slices"
 
 	"github.com/E-Maxon/what-your-type-bot/config"
@@ -12,9 +13,10 @@ import (
 )
 
 var (
-	startCmd       = "start"
-	backCmd        = "back"
-	answerVariants = map[string]int{
+	startCmd            = "start"
+	backCmd             = "back"
+	answerVariants      = []string{"Да", "Нет", "Частично"}
+	answerVariantPoints = map[string]int{
 		"Нет":      1,
 		"Частично": 2,
 		"Да":       3,
@@ -22,7 +24,7 @@ var (
 )
 
 type Bot interface {
-	Start(ctx context.Context) error
+	Start() error
 }
 
 type bot struct {
@@ -31,10 +33,18 @@ type bot struct {
 	cfg   *config.Config
 }
 
+type messageInfo struct {
+	messageID   int
+	messageText string
+}
+
 type chat struct {
-	id            int64
-	questionIndex int
-	answers       []int
+	id             int64
+	questionIndex  int
+	answers        []string
+	messageInfos   []messageInfo
+	lastMessageID  int
+	buttonsRemoved bool
 }
 
 func NewBot(cfg *config.Config) Bot {
@@ -44,7 +54,7 @@ func NewBot(cfg *config.Config) Bot {
 	}
 }
 
-func (b *bot) Start(ctx context.Context) error {
+func (b *bot) Start() error {
 	var err error
 	b.tgAPI, err = tg_api.NewTgAPI(b.cfg.TelegramInfo.Token)
 	if err != nil {
@@ -56,42 +66,83 @@ func (b *bot) Start(ctx context.Context) error {
 		return err
 	}
 
-	updates := b.tgAPI.ListenForWebhook("/")
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("Got stop signal. Stopping the bot")
-			return nil
-		case update := <-updates:
-			if update.Message != nil {
-				if update.Message.Text == "/start" {
-					err := b.startQuiz(update.Message)
-					if err != nil {
-						log.Println(err)
-					}
-				}
-			}
+	http.HandleFunc("/", b.handleUpdates)
+	return http.ListenAndServe(":8080", nil)
+}
 
-			if update.CallbackQuery != nil {
-				err := b.handleCallback(update.CallbackQuery)
-				if err != nil {
-					log.Println(err)
-				}
+func (b *bot) handleUpdates(w http.ResponseWriter, r *http.Request) {
+	var update tgbotapi.Update
+	err := json.NewDecoder(r.Body).Decode(&update)
+	if err != nil {
+		log.Println("Error decoding update:", err)
+		return
+	}
+	if update.Message != nil {
+		if update.Message.Text == "/start" {
+			err := b.startQuiz(update.Message)
+			if err != nil {
+				log.Println(err)
 			}
+		}
+	}
+
+	if update.CallbackQuery != nil {
+		err := b.handleCallback(update.CallbackQuery)
+		if err != nil {
+			log.Println(err)
 		}
 	}
 }
 
+func (b *bot) removeOldButtonsAndSend(chatID int64, msg tgbotapi.Chattable) (tgbotapi.Message, error) {
+	chat, ok := b.chats[chatID]
+	if ok && !chat.buttonsRemoved {
+		removeButtonsMsg := tgbotapi.NewEditMessageReplyMarkup(chatID, chat.lastMessageID, tgbotapi.NewInlineKeyboardMarkup([]tgbotapi.InlineKeyboardButton{}))
+		_, err := b.tgAPI.SendMessage(removeButtonsMsg)
+		if err != nil {
+			return tgbotapi.Message{}, err
+		}
+	}
+	sentMsg, err := b.tgAPI.SendMessage(msg)
+	if err != nil {
+		return tgbotapi.Message{}, err
+	}
+	if ok {
+		chat.buttonsRemoved = false
+	}
+	return sentMsg, nil
+}
+
 func (b *bot) startQuiz(update *tgbotapi.Message) error {
 	chatID := update.Chat.ID
-	msg := tgbotapi.NewMessage(chatID, b.cfg.Greeting)
+	msg := tgbotapi.NewMessage(chatID, b.cfg.QuizData.Greeting)
 	msg.ReplyMarkup = createStartButton()
-	err := b.tgAPI.SendMessage(chatID, msg)
+	sentMsg, err := b.removeOldButtonsAndSend(chatID, msg)
 	if err != nil {
 		return fmt.Errorf("startQuiz: Got error. ChatID: %d; UserID: %d; Error: %v", chatID, update.From.ID, err)
 	}
+
 	delete(b.chats, chatID)
+	b.chats[chatID] = &chat{
+		id:             chatID,
+		questionIndex:  0,
+		answers:        []string{},
+		lastMessageID:  sentMsg.MessageID,
+		buttonsRemoved: false,
+	}
 	return nil
+}
+
+func (b *bot) createButtons(chat *chat) [][]tgbotapi.InlineKeyboardButton {
+	var keyboard [][]tgbotapi.InlineKeyboardButton
+	for _, variant := range answerVariants {
+		keyboard = addButton(keyboard, variant, formatCallbackData(chat.questionIndex, variant))
+	}
+	if chat.questionIndex != 0 {
+		keyboard = addButton(keyboard, "Назад", formatCallbackData(chat.questionIndex, backCmd))
+	}
+	keyboard = addButton(keyboard, "Сбросить результаты и начать заново", &startCmd)
+	return keyboard
 }
 
 func (b *bot) sendQuestion(chatID int64) error {
@@ -99,24 +150,27 @@ func (b *bot) sendQuestion(chatID int64) error {
 	if err != nil {
 		return fmt.Errorf("sendQuestion: %v", err)
 	}
-	if chat.questionIndex >= len(b.cfg.Questions) {
+	if chat.questionIndex >= len(b.cfg.QuizData.Questions) {
 		return fmt.Errorf("sendQuestion: there is no question with index %d", chat.questionIndex)
 	}
 
-	curQuestion := b.cfg.Questions[chat.questionIndex]
+	curQuestion := b.cfg.QuizData.Questions[chat.questionIndex]
+	question := formatQuestion(chat.questionIndex, curQuestion)
+	msg := tgbotapi.NewMessage(chatID, question)
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(b.createButtons(chat)...)
+	msg.ParseMode = "HTML"
 
-	var keyboard [][]tgbotapi.InlineKeyboardButton
-	for variant := range answerVariants {
-		keyboard = addButton(keyboard, variant, formatCallbackData(chat.questionIndex, variant))
+	sentMsg, err := b.removeOldButtonsAndSend(chatID, msg)
+	if err != nil {
+		return fmt.Errorf("sendQuestion: %v", err)
 	}
-	if chat.questionIndex != 0 {
-		keyboard = addButton(keyboard, "Назад", formatCallbackData(chat.questionIndex, backCmd))
-	}
-	keyboard = addButton(keyboard, "Сбросить результаты и начать заново", &startCmd)
 
-	msg := tgbotapi.NewMessage(chatID, formatQuestion(chat.questionIndex, curQuestion))
-	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(keyboard...)
-	return b.tgAPI.SendMessage(chatID, msg)
+	chat.lastMessageID = sentMsg.MessageID
+	chat.messageInfos = append(chat.messageInfos, messageInfo{
+		messageID:   sentMsg.MessageID,
+		messageText: question,
+	})
+	return nil
 }
 
 func (b *bot) sendResults(chatID int64) error {
@@ -126,7 +180,7 @@ func (b *bot) sendResults(chatID int64) error {
 		return fmt.Errorf("sendResults: %v", err)
 	}
 
-	for id, info := range b.cfg.Calculation {
+	for id, info := range b.cfg.QuizData.Calculation {
 		for _, questionIndex := range info.QuestionIndexes {
 			if questionIndex >= len(chat.answers) {
 				return fmt.Errorf("sendResults: questionIndex >= len(answers)")
@@ -137,7 +191,7 @@ func (b *bot) sendResults(chatID int64) error {
 				scores[id] = &t
 				score = scores[id]
 			}
-			*score += chat.answers[questionIndex]
+			*score += answerVariantPoints[chat.answers[questionIndex]]
 		}
 	}
 
@@ -170,29 +224,36 @@ func (b *bot) sendResults(chatID int64) error {
 	})
 
 	resType := res[len(res)-1]
-	text := fmt.Sprintf("Результат:\nВаш тип личности - %s\nОписание типа: %s", resType.id, b.cfg.Calculation[resType.id].Description)
+	text := fmt.Sprintf("<b>Результат:</b>\n\nВаш тип личности - <b>%s</b>\n<b>Описание типа:</b> %s", resType.id, b.cfg.QuizData.Calculation[resType.id].Description)
 
 	msg := tgbotapi.NewMessage(chatID, text)
-	return b.tgAPI.SendMessage(chatID, msg)
+	msg.ParseMode = "HTML"
+	keyboard := [][]tgbotapi.InlineKeyboardButton{}
+	keyboard = addButton(keyboard, "Пройти тест заново", &startCmd)
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(keyboard...)
+	sentMsg, err := b.removeOldButtonsAndSend(chatID, msg)
+	if err != nil {
+		return err
+	}
+	chat.lastMessageID = sentMsg.MessageID
+	return err
 }
 
 func (b *bot) handleCallback(callback *tgbotapi.CallbackQuery) error {
 	chatID := callback.Message.Chat.ID
 	data := callback.Data // Ответ пользователя
 
-	if _, ok := b.chats[chatID]; !ok {
-		b.chats[chatID] = &chat{
-			id:            chatID,
-			questionIndex: 0,
-			answers:       []int{},
-		}
+	err := b.tgAPI.AnswerCallbackQuery(callback.ID)
+	if err != nil {
+		return err
 	}
 
 	chat := b.chats[chatID]
-
 	if data == startCmd {
-		delete(b.chats, chatID)
-		err := b.sendQuestion(chatID)
+		chat.answers = []string{}
+		chat.messageInfos = []messageInfo{}
+		chat.questionIndex = 0
+		err = b.sendQuestion(chatID)
 		if err != nil {
 			return fmt.Errorf("got error. chatID: %d; userID: %d; method: sendQuestion; error: %v\n", chatID, callback.From.ID, err)
 		}
@@ -205,25 +266,59 @@ func (b *bot) handleCallback(callback *tgbotapi.CallbackQuery) error {
 		return fmt.Errorf("CallbackData parsing error: %v", err)
 	}
 
-	if questionIndex != chat.questionIndex {
+	if questionIndex != chat.questionIndex-1 {
 		return nil
 	}
 
 	if answer == backCmd {
-		chat.questionIndex -= 2
-		err := b.sendQuestion(chatID)
+		err := b.tgAPI.DeleteMessage(tgbotapi.NewDeleteMessage(
+			chatID,
+			chat.messageInfos[chat.questionIndex-1].messageID,
+		))
 		if err != nil {
-			chat.questionIndex += 2
-			return fmt.Errorf("got error. chatID: %d; userID: %d; method: sendQuestion; error: %v\n", chatID, callback.From.ID, err)
+			return err
 		}
+		lastMessageInfo := chat.messageInfos[chat.questionIndex-2]
+		msg := tgbotapi.NewEditMessageText(
+			chatID,
+			lastMessageInfo.messageID,
+			lastMessageInfo.messageText,
+		)
+		chat.questionIndex -= 2
+		msg.ReplyMarkup = &tgbotapi.InlineKeyboardMarkup{
+			InlineKeyboard: b.createButtons(chat),
+		}
+		msg.ParseMode = "HTML"
+		sentMsg, err := b.tgAPI.SendMessage(msg)
+		if err != nil {
+			return err
+		}
+		chat.lastMessageID = sentMsg.MessageID
+		chat.answers = chat.answers[:len(chat.answers)-1]
+		chat.messageInfos = chat.messageInfos[:len(chat.messageInfos)-1]
 		chat.questionIndex++
 		return nil
 	}
 
-	chat.answers = append(chat.answers, answerVariants[answer])
+	chat.answers = append(chat.answers, answer)
+
+	if len(chat.messageInfos) > 0 {
+		lastMessageInfo := chat.messageInfos[len(chat.messageInfos)-1]
+		msg := tgbotapi.NewEditMessageText(
+			chatID,
+			lastMessageInfo.messageID,
+			fmt.Sprintf("%s\n\n<b>Ваш ответ: %s</b>", lastMessageInfo.messageText, chat.answers[len(chat.answers)-1]),
+		)
+		msg.ParseMode = "HTML"
+		_, err := b.tgAPI.SendMessage(msg)
+		if err != nil {
+			return err
+		}
+		chat.buttonsRemoved = true
+	}
 
 	// Переходим к следующему вопросу
-	if chat.questionIndex < len(b.cfg.Questions) {
+	if chat.questionIndex < len(b.cfg.QuizData.Questions) {
 		err := b.sendQuestion(chatID)
 		if err != nil {
 			return fmt.Errorf("got error. chatID: %d; userID: %d; method: sendQuestion; error: %v\n", chatID, callback.From.ID, err)
@@ -235,7 +330,6 @@ func (b *bot) handleCallback(callback *tgbotapi.CallbackQuery) error {
 		if err != nil {
 			return fmt.Errorf("got error. chatID: %d; userID: %d; method: sendQuestion; error: %v\n", chatID, callback.From.ID, err)
 		}
-		delete(b.chats, chatID)
 	}
 
 	return nil
