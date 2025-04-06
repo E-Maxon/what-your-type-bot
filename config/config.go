@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 )
 
 type QuizData struct {
@@ -24,6 +25,8 @@ type TelegramInfo struct {
 
 type Config struct {
 	QuizData     *QuizData
+	ClearPeriod  time.Duration
+	ChatTtl      time.Duration
 	TelegramInfo *TelegramInfo
 }
 
@@ -37,25 +40,42 @@ func ParseConfig() (*Config, error) {
 		return nil, err
 	}
 
-	var quizData QuizData
-	err = json.Unmarshal(file, &quizData)
+	var cfg struct {
+		QuizData    *QuizData `json:"quiz_data"`
+		ClearPeriod string    `json:"clear_period"`
+		ChatTtl     string    `json:"chat_ttl"`
+	}
+
+	err = json.Unmarshal(file, &cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, psychoType := range quizData.Calculation {
+	for _, psychoType := range cfg.QuizData.Calculation {
 		for i := range psychoType.QuestionIndexes {
 			psychoType.QuestionIndexes[i]--
 		}
 	}
 
-	cfg := &Config{
-		QuizData: &quizData,
+	clearPeriod, err := time.ParseDuration(cfg.ClearPeriod)
+	if err != nil {
+		return nil, err
+	}
+
+	chatTtl, err := time.ParseDuration(cfg.ChatTtl)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &Config{
+		QuizData: cfg.QuizData,
 		TelegramInfo: &TelegramInfo{
 			Token:      os.Getenv("BOT_TOKEN"),
 			WebhookUrl: os.Getenv("WEBHOOK_URL"),
 		},
+		ClearPeriod: clearPeriod,
+		ChatTtl:     chatTtl,
 	}
 
-	return cfg, nil
+	return res, nil
 }
