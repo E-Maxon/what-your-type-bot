@@ -53,6 +53,8 @@ func (tg *tgAPI) getChatLimiter(chatID int64) ratelimit.Limiter {
 			lastActivity: time.Now(),
 		}
 		tg.limiterByChat.Store(chatID, chatLim)
+	} else {
+		chatLim.(*chatLimiter).lastActivity = time.Now()
 	}
 	return chatLim.(*chatLimiter).limiter
 }
